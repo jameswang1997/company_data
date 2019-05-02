@@ -1,0 +1,114 @@
+# 1. load package
+```{r, message=F}
+library(RPostgreSQL) %>% suppressPackageStartupMessages()
+library(dplyr)%>% suppressPackageStartupMessages()
+library(ggplot2)
+library(stringr)
+library(glmnet)
+library(GGally)
+library(ggpubr)
+library(caret)
+library(pROC)
+library(randomForest)
+library(bartMachine)
+library(doParallel)
+library(BAS)
+library(corrplot)
+library(lubridate)
+set.seed(2)
+```
+
+
+### connect to db
+```{r}
+# https://www.r-bloggers.com/getting-started-with-postgresql-in-r/
+# loads the PostgreSQL driver
+drv <- dbDriver("PostgreSQL")
+# creates a connection to the postgres database
+# note that "con" will be used later in each connection to the database
+con <- dbConnect(drv, dbname = "sp1",
+                 host = "localhost", port = 5432,
+                 user = "postgres", password = '')
+getDf = function(sqlFileName, con = con) {
+  query = readLines(sqlFileName) %>% paste(collapse = "\n")
+  data =  dbGetQuery(con, query)
+  data
+}
+```
+
+```{r}
+query = 'SELECT * FROM lm_model_input'
+df.user.agg = dbGetQuery(con, query)
+df.user.agg1 = df.user.agg
+# write.csv(df.user.agg1, 'company_1customer.csv', row.names = F)
+```
+## a. train test split
+```{r}
+set.seed(111)
+df.user.agg1$purchase1 = ifelse( df.user.agg1$purchase == 1, 'Yes', 'No') %>% as.factor()
+train_idx = createDataPartition(df.user.agg1$purchase, p= .7, list = F)
+train = df.user.agg1[train_idx,]
+test = df.user.agg1[-train_idx,]
+# upwnsample
+train.us = upSample(x = train,
+                      y = train$purchase1)
+```
+
+
+```{r}
+# run out of ram
+# https://stackoverflow.com/questions/7963393/out-of-memory-error-java-when-using-r-and-xlconnect-package
+options(java.parameters = "-Xmx3g")
+set_bart_machine_num_cores(1)
+X = train.us %>% select(-customer_id_g, -purchase1, -purchase, -Class)
+y = train.us$purchase %>% factor
+# bm1 = bartMachineCV(X, y , num_tree_cvs = c(20,50), mem_cache_for_speed = F, prob_rule_class = .3)
+bm1 = bartMachine(X,y , num_trees = 10, k = 2,  mem_cache_for_speed = F,verbose = F,serialize = T)
+save.image('bm_sp10tree.RData')
+X %>% dim
+```
+
+
+diagnostic
+```{r}
+plot_convergence_diagnostics(bm1)
+```
+```{r}
+bm1$confusion_matrix
+```
+bart predicts 4% better ROC than ols
+```{r}
+X.test = test %>% select(-customer_id_g, -purchase1, -purchase)
+pred.bart = predict(bm1, X.test, type = 'prob')
+
+ROC.bart = roc(response = test$purchase,
+           predictor = pred.bart)
+ROC.bart
+```
+
+```{r}
+plot.roc(test$purchase, pred.bart,
+         percent = T, thresholds = 'best',
+         print.thres = 'best',
+         ci = T, of = 'threshold',
+        specificities = seq(0, 100, 5),           # on a select set of specificities
+                   # ci.type="shape",
+                   ci.col="#1c61b6AA",
+        col = rgb(0, .5, 0, .5))
+```
+
+```{r}
+set_bart_machine_num_cores(7)
+vs = var_selection_by_permute(bm1, bottom_margin = .7,num_permute_samples =5)
+```
+
+```{r}
+vs$important_vars_local_names
+```
+
+
+# interaction
+```{r}
+interaction_investigator(bm1, num_replicates_for_avg = 25, num_var_plot = 10, bottom_margin = 8) 
+```
+
